@@ -10,7 +10,7 @@
     font-family: Arial, sans-serif;
     margin: 20px; padding: 0; background: #f0f0f0;
   }
-  #login-section, #call-section, #incoming-call, #video-section {
+  #login-section, #call-section, #incoming-call, #video-section, #calling-waiting {
     max-width: 400px; margin: 20px auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 8px rgba(0,0,0,0.1);
   }
   #login-section input, #call-section input {
@@ -77,6 +77,11 @@
   <button id="rejectBtn" style="background:#dc3545;">Отклонить</button>
 </div>
 
+<div id="calling-waiting" style="display:none; text-align:center;">
+  <h3>Звонок... Ожидание ответа</h3>
+  <button id="cancelCallBtn" style="background:#dc3545;">Отменить звонок</button>
+</div>
+
 <div id="video-section" style="display:none;">
   <h3>Соединение</h3>
   <video id="localVideo" autoplay muted playsinline></video>
@@ -85,8 +90,6 @@
 </div>
 
 <script>
-  // ------------------------
-  // Firebase config и инициализация
   const firebaseConfig = {
     apiKey: "AIzaSyBe_1TtWe4eVDqaljX_lEsTffsUfC5irKM",
     authDomain: "callapp-69a1e.firebaseapp.com",
@@ -101,8 +104,7 @@
   firebase.initializeApp(firebaseConfig);
   const db = firebase.database();
 
-  // ------------------------
-  // Переменные UI
+  // UI Elements
   const loginSection = document.getElementById('login-section');
   const usernameInput = document.getElementById('usernameInput');
   const loginBtn = document.getElementById('loginBtn');
@@ -126,31 +128,25 @@
   const answerBtn = document.getElementById('answerBtn');
   const rejectBtn = document.getElementById('rejectBtn');
 
+  const callingWaitingDiv = document.getElementById('calling-waiting');
+  const cancelCallBtn = document.getElementById('cancelCallBtn');
+
   const videoSection = document.getElementById('video-section');
   const localVideo = document.getElementById('localVideo');
   const remoteVideo = document.getElementById('remoteVideo');
   const hangupBtn = document.getElementById('hangupBtn');
 
-  // ------------------------
-  // Глобальные переменные
-  let currentUser = null;  // {username, number}
+  // Global vars
+  let currentUser = null;
   let localStream = null;
   let peerConnection = null;
-  let callRef = null;       // ссылка на текущий звонок в Firebase
-  let callType = "audio";  // audio или video
+  let callRef = null;
+  let callType = "audio";
   let incomingCallId = null;
 
-  // WebRTC конфигурация
-  const rtcConfig = {
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" }
-    ]
-  };
+  const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
-  // ------------------------
-  // Генерация уникального 4-значного номера телефона
   async function generateUniqueNumber() {
-    // Забираем всех пользователей
     const snapshot = await db.ref('Users').get();
     let usedNumbers = new Set();
     if (snapshot.exists()) {
@@ -160,17 +156,14 @@
         }
       });
     }
-    // Ищем свободный номер от 1000 до 9999
     for(let i=1000; i<=9999; i++){
       if(!usedNumbers.has(i.toString())){
         return i.toString();
       }
     }
-    return null; // нет свободных номеров
+    return null;
   }
 
-  // ------------------------
-  // Логика регистрации / входа
   loginBtn.onclick = async () => {
     loginError.textContent = '';
     errorDiv.textContent = '';
@@ -186,29 +179,18 @@
       const snapshot = await userRef.get();
 
       if(snapshot.exists()){
-        // Пользователь существует — обновляем online
         await userRef.update({ online: true });
-        currentUser = {
-          username,
-          number: snapshot.val().number
-        };
+        currentUser = { username, number: snapshot.val().number };
       } else {
-        // Новый пользователь — генерируем уникальный номер
         const newNumber = await generateUniqueNumber();
         if(newNumber === null){
-          loginError.textContent = 'Извините, все номера заняты. Удалите старый аккаунт, чтобы создать новый.';
+          loginError.textContent = 'Извините, все номера заняты.';
           return;
         }
-        await userRef.set({
-          online: true,
-          number: newNumber,
-          blocked: {},
-          missedCalls: {}
-        });
+        await userRef.set({ online: true, number: newNumber, blocked: {}, missedCalls: {} });
         currentUser = { username, number: newNumber };
       }
 
-      // Показываем UI звонков
       loginSection.style.display = 'none';
       callSection.style.display = 'block';
       userDisplay.textContent = currentUser.username;
@@ -216,14 +198,15 @@
 
       subscribeIncomingCalls();
 
+      // Сразу запросим доступ к камере и микрофону при входе
+      await requestMediaPermissions();
+
     } catch(e){
       console.error(e);
       loginError.textContent = 'Ошибка подключения к базе данных';
     }
   };
 
-  // ------------------------
-  // Логика выхода
   logoutBtn.onclick = async () => {
     if(!currentUser) return;
     try {
@@ -231,55 +214,33 @@
       await userRef.update({ online: false });
     } catch {}
     currentUser = null;
-    callSection.style.display = 'none';
-    loginSection.style.display = 'block';
+    clearCallData();
+    showOnly(loginSection);
     usernameInput.value = '';
     callToNumberInput.value = '';
-    callStatus.textContent = '';
-    errorDiv.textContent = '';
-    incomingCallDiv.style.display = 'none';
-    videoSection.style.display = 'none';
-    if(peerConnection) {
-      peerConnection.close();
-      peerConnection = null;
-    }
   };
 
-  // ------------------------
-  // Удаление аккаунта
   deleteAccountBtn.onclick = async () => {
     if(!currentUser) return;
     if(!confirm('Вы уверены, что хотите удалить свой аккаунт? Это действие необратимо.')) return;
     try {
       await db.ref(`Users/${currentUser.username}`).remove();
       currentUser = null;
-      callSection.style.display = 'none';
-      loginSection.style.display = 'block';
+      clearCallData();
+      showOnly(loginSection);
       usernameInput.value = '';
       callToNumberInput.value = '';
-      callStatus.textContent = '';
-      errorDiv.textContent = '';
-      incomingCallDiv.style.display = 'none';
-      videoSection.style.display = 'none';
-      if(peerConnection) {
-        peerConnection.close();
-        peerConnection = null;
-      }
     } catch (e) {
       errorDiv.textContent = 'Ошибка при удалении аккаунта';
     }
   };
 
-  // ------------------------
-  // Проверка заблокирован ли номер
   async function isBlocked(targetUsername, callerNumber) {
     const blockedSnapshot = await db.ref(`Users/${targetUsername}/blocked`).get();
     if (!blockedSnapshot.exists()) return false;
     return blockedSnapshot.hasChild(callerNumber);
   }
 
-  // ------------------------
-  // Логика звонка
   callBtn.onclick = async () => {
     errorDiv.textContent = '';
     callStatus.textContent = '';
@@ -295,7 +256,6 @@
     callType = callTypeSelect.value;
 
     try {
-      // Найти пользователя по номеру
       const usersSnapshot = await db.ref('Users').get();
       let targetUsername = null;
       usersSnapshot.forEach(userSnap => {
@@ -309,24 +269,21 @@
         return;
       }
 
-      // Проверить блокировку
       const blocked = await isBlocked(targetUsername, currentUser.number);
       if(blocked){
-        errorDiv.textContent = 'Вы заблокированы этим пользователем. Звонок невозможен.';
+        errorDiv.textContent = 'Вы заблокированы этим пользователем.';
         return;
       }
 
-      // Проверить онлайн статус
       const targetUserSnap = await db.ref(`Users/${targetUsername}/online`).get();
       if(!targetUserSnap.exists() || !targetUserSnap.val()){
-        errorDiv.textContent = 'Пользователь сейчас офлайн. Мы отправим ему уведомление о пропущенном звонке.';
-        // Добавить пропущенный звонок
+        errorDiv.textContent = 'Пользователь офлайн. Добавлен пропущенный звонок.';
         const missedRef = db.ref(`Users/${targetUsername}/missedCalls/${currentUser.number}`);
         await missedRef.set({ username: currentUser.username, timestamp: Date.now() });
         return;
       }
 
-      callStatus.textContent = `Звонок ${callType} на номер ${toNumber} (пользователь: ${targetUsername})...`;
+      callStatus.textContent = `Звонок ${callType} на номер ${toNumber}...`;
 
       // Создаем объект звонка
       callRef = db.ref(`Calls/${targetUsername}_${currentUser.username}_${Date.now()}`);
@@ -344,6 +301,8 @@
         iceCandidates: {}
       });
 
+      showOnly(callingWaitingDiv);
+
       // Запускаем WebRTC как звонящий
       await startCallAsCaller();
 
@@ -353,13 +312,20 @@
     }
   };
 
-  // ------------------------
-  // Подписка на входящие звонки
+  cancelCallBtn.onclick = async () => {
+    if(callRef) {
+      await callRef.remove();
+      callRef = null;
+    }
+    clearCallData();
+    showOnly(callSection);
+  };
+
   function subscribeIncomingCalls(){
     if(!currentUser) return;
 
     const callsRef = db.ref('Calls');
-    callsRef.off(); // отключаем предыдущие слушатели
+    callsRef.off();
 
     callsRef.on('child_added', async (snap) => {
       const call = snap.val();
@@ -368,70 +334,77 @@
         incomingCallerSpan.textContent = call.fromNumber;
         incomingCallerNameSpan.textContent = call.from;
         incomingCallTypeSpan.textContent = call.type;
-        incomingCallDiv.style.display = 'block';
-        callSection.style.display = 'none';
+        showOnly(incomingCallDiv);
         console.log('Входящий звонок от', call.from);
       }
     });
 
-    // Обработать удаление звонка (отбой, отклонение)
+    // Слушаем удаление звонка у всех, чтобы закрывать соединение и UI
     callsRef.on('child_removed', () => {
-      endCallUI();
+      clearCallData();
+      showOnly(callSection);
     });
   }
 
-  // ------------------------
-  // Принять звонок
   answerBtn.onclick = async () => {
+    showOnly(videoSection);
     incomingCallDiv.style.display = 'none';
-    callSection.style.display = 'none';
 
-    // Начинаем WebRTC как принимающий
     await startCallAsReceiver(incomingCallId);
   };
 
-  // ------------------------
-  // Отклонить звонок
   rejectBtn.onclick = async () => {
     if(!incomingCallId) return;
     await db.ref(`Calls/${incomingCallId}`).remove();
     incomingCallDiv.style.display = 'none';
-    callSection.style.display = 'block';
+    showOnly(callSection);
   };
 
-  // ------------------------
-  // Отбой (закрыть звонок)
   hangupBtn.onclick = async () => {
     if(callRef) {
       await callRef.remove();
       callRef = null;
     }
-    if(peerConnection){
-      peerConnection.close();
-      peerConnection = null;
-    }
-    endCallUI();
-    callSection.style.display = 'block';
+    clearCallData();
+    showOnly(callSection);
   };
 
-  // ------------------------
-  // UI после окончания звонка
-  function endCallUI(){
+  function clearCallData(){
     incomingCallDiv.style.display = 'none';
+    callingWaitingDiv.style.display = 'none';
     videoSection.style.display = 'none';
-    callSection.style.display = 'block';
     callStatus.textContent = '';
     errorDiv.textContent = '';
     localVideo.style.display = 'none';
     remoteVideo.style.display = 'none';
+    callToNumberInput.value = '';
+
+    if(peerConnection){
+      peerConnection.close();
+      peerConnection = null;
+    }
+    if(localStream){
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+    }
+    callRef = null;
+    incomingCallId = null;
   }
 
-  // ------------------------
-  // Запуск звонка как вызывающий
-  async function startCallAsCaller() {
+  function showOnly(element){
+    // Скрываем все основные блоки
+    loginSection.style.display = 'none';
     callSection.style.display = 'none';
-    videoSection.style.display = callType === 'video' ? 'block' : 'none';
+    incomingCallDiv.style.display = 'none';
+    callingWaitingDiv.style.display = 'none';
+    videoSection.style.display = 'none';
 
+    // Показываем только нужный
+    element.style.display = 'block';
+  }
+
+  async function startCallAsCaller() {
+    callType = callTypeSelect.value;
     localStream = await navigator.mediaDevices.getUserMedia({
       audio: true,
       video: callType === 'video'
@@ -440,8 +413,6 @@
     if(callType === 'video') localVideo.style.display = 'block';
 
     peerConnection = new RTCPeerConnection(rtcConfig);
-
-    // Добавляем локальные треки
     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
     peerConnection.ontrack = (event) => {
@@ -456,22 +427,19 @@
       }
     };
 
-    // Создаем оффер
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
-    // Сохраняем offer напрямую без toJSON()
     await callRef.update({ offer: offer });
 
-    // Слушаем ответ
     callRef.child('answer').on('value', async snapshot => {
       const answer = snapshot.val();
       if(answer){
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
         callStatus.textContent = 'Звонок установлен!';
+        showOnly(videoSection);
       }
     });
 
-    // Слушаем ICE кандидаты от вызываемого
     callRef.child('iceCandidates/callee').on('child_added', async snapshot => {
       const candidate = snapshot.val();
       if(candidate){
@@ -484,18 +452,13 @@
     });
   }
 
-  // ------------------------
-  // Запуск звонка как принимающий
   async function startCallAsReceiver(callId) {
-    videoSection.style.display = 'block';
-    incomingCallDiv.style.display = 'none';
-
     callRef = db.ref(`Calls/${callId}`);
-
     const callSnap = await callRef.get();
     if(!callSnap.exists()){
-      alert('Этот звонок уже завершен');
-      endCallUI();
+      alert('Этот звонок уже завершён');
+      clearCallData();
+      showOnly(callSection);
       return;
     }
     const callData = callSnap.val();
@@ -509,8 +472,6 @@
     if(callType === 'video') localVideo.style.display = 'block';
 
     peerConnection = new RTCPeerConnection(rtcConfig);
-
-    // Добавляем локальные треки
     localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
     peerConnection.ontrack = (event) => {
@@ -525,17 +486,14 @@
       }
     };
 
-    // Устанавливаем оффер от вызывающего
     await peerConnection.setRemoteDescription(new RTCSessionDescription(callData.offer));
-
-    // Создаем answer
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
-
-    // Обновляем answer в Firebase
     await callRef.update({ answer });
 
-    // Слушаем ICE кандидаты от вызывающего
+    callStatus.textContent = 'Звонок установлен!';
+    showOnly(videoSection);
+
     callRef.child('iceCandidates/caller').on('child_added', async snapshot => {
       const candidate = snapshot.val();
       if(candidate){
@@ -546,18 +504,14 @@
         }
       }
     });
-
-    // Обновляем статус звонка
-    await callRef.update({ status: "connected" });
-
-    callStatus.textContent = 'Звонок установлен!';
   }
 
-  // ------------------------
-  // Автоматически убрать пропущенные звонки при входе (опционально)
-  async function cleanMissedCalls(){
-    if(!currentUser) return;
-    await db.ref(`Users/${currentUser.username}/missedCalls`).remove();
+  async function requestMediaPermissions() {
+    try {
+      await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch(e){
+      console.warn('Нет доступа к камере/микрофону:', e);
+    }
   }
 
 </script>
